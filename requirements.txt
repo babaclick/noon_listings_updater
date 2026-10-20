@@ -1,0 +1,8 @@
+streamlit[auth]
+pandas
+openpyxl
+httpx
+PyJWT
+cryptography
+psycopg[binary]
+Authlib>=1.3.2
