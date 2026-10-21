@@ -1,0 +1,25 @@
+# Render web service. Connect the noon_listings_updater repository.
+# After the first deploy, set CLERK_AUTHORIZED_PARTIES to this service's
+# public origin, for example https://noon-listings-updater.onrender.com
+# Also add that origin in the Clerk dashboard.
+
+services:
+  - type: web
+    name: noon-listings-updater
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python run.py
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: CLERK_PUBLISHABLE_KEY
+        sync: false
+      - key: CLERK_JWT_ISSUER
+        value: https://sunny-rattler-44.clerk.accounts.dev
+      - key: CLERK_AUTHORIZED_PARTIES
+        sync: false
+      - key: BABACLICK_PROD_DATABASE_URL
+        sync: false

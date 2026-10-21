@@ -8,16 +8,10 @@ import streamlit as st
 import psycopg
 
 from catalog import check_connection, save_listing
+from clerk_auth import ClerkAuthError, clerk_user_label, revoke_session, session_is_active, verify_clerk_token
 from mapping import classify_columns, sku_column, weight_unit
 from noon_client import NoonClient, apply_changes
-from settings import (
-    AUTH_ENV,
-    DATABASE_ENV,
-    DEFAULT_REDIRECT_URI,
-    missing_auth_env,
-    production_database_url,
-    write_auth_secrets,
-)
+from settings import AUTH_ENV, DATABASE_ENV, missing_auth_env, production_database_url, sign_in_url
 
 st.set_page_config(page_title="Noon listing update", layout="wide")
 st.title("Noon listing update")
@@ -26,47 +20,105 @@ missing_auth = missing_auth_env()
 if missing_auth or not production_database_url():
     st.error("Clerk sign-in and the production database are not configured.")
     st.write(
-        "In the Clerk dashboard, open OAuth applications and create one for this app. "
-        f"Set the redirect URI to {DEFAULT_REDIRECT_URI} and allow the openid, email, and profile scopes. "
-        "Then put these variables in noon_listing_updater/.env and start with python run.py."
+        "Use the same Clerk instance as Pforge. Copy CLERK_SECRET_KEY and CLERK_JWT_ISSUER "
+        "from Pforge Backend, and CLERK_PUBLISHABLE_KEY from the frontend "
+        "VITE_CLERK_PUBLISHABLE_KEY. On Render, set them as service environment variables. "
+        "CLERK_AUTHORIZED_PARTIES is this service's public origin, such as "
+        "https://your-service.onrender.com."
     )
     needed = list(missing_auth)
     if not production_database_url():
         needed.append(DATABASE_ENV)
-    st.code("\n".join(dict.fromkeys([*AUTH_ENV, DATABASE_ENV])))
+    st.code("\n".join(dict.fromkeys([*AUTH_ENV, "CLERK_AUTHORIZED_PARTIES", DATABASE_ENV])))
     if needed:
         st.write("Missing: " + ", ".join(needed))
     st.stop()
 
-try:
-    write_auth_secrets()
-    logged_in = bool(st.user.is_logged_in)
-except Exception:
-    st.error(
-        "The environment variables are set. Stop this server and start it again "
-        "with python run.py so Clerk sign-in can load."
-    )
-    st.stop()
 
-if not logged_in:
+def _query_value(name: str) -> str:
+    raw = st.query_params.get(name, "")
+    if isinstance(raw, (list, tuple)):
+        raw = raw[-1] if raw else ""
+    return str(raw or "").strip()
+
+
+def _session_cookie() -> str:
+    cookies = getattr(st.context, "cookies", {}) or {}
+    named = {str(name): str(value).strip() for name, value in cookies.items()}
+    if named.get("noon_clerk_token"):
+        return named["noon_clerk_token"]
+    for name, value in named.items():
+        if name.startswith("__session") and value:
+            return value
+    return ""
+
+
+def _establish_session(token: str) -> None:
+    claims = verify_clerk_token(token)
+    session_id = str(claims.get("sid") or "").strip()
+    user_id = str(claims["sub"])
+    st.session_state.clerk_user = {
+        "sub": user_id,
+        "sid": session_id,
+        "label": clerk_user_label(user_id),
+    }
+    st.session_state.pop("clerk_error", None)
+
+
+if _query_value("clerk_signed_out") == "1":
+    current = st.session_state.get("clerk_user") or {}
+    if current.get("sid"):
+        try:
+            revoke_session(str(current["sid"]))
+        except ClerkAuthError as exc:
+            st.session_state.clerk_error = str(exc)
+    st.session_state.pop("clerk_user", None)
+    del st.query_params["clerk_signed_out"]
+    st.rerun()
+
+presented = _query_value("clerk_token")
+from_query = bool(presented)
+if not presented and not st.session_state.get("clerk_user"):
+    presented = _session_cookie()
+if presented and from_query:
+    try:
+        _establish_session(presented)
+    except ClerkAuthError as exc:
+        st.session_state.pop("clerk_user", None)
+        st.session_state.clerk_error = str(exc)
+    del st.query_params["clerk_token"]
+    st.rerun()
+elif presented and not st.session_state.get("clerk_user"):
+    try:
+        _establish_session(presented)
+    except ClerkAuthError as exc:
+        if not exc.expired:
+            st.session_state.clerk_error = str(exc)
+
+clerk_user = st.session_state.get("clerk_user")
+if clerk_user:
+    session_id = str(clerk_user.get("sid") or "")
+    if session_id:
+        try:
+            active = session_is_active(session_id)
+        except ClerkAuthError as exc:
+            st.error(str(exc))
+            st.stop()
+        if not active:
+            st.session_state.pop("clerk_user", None)
+            clerk_user = None
+
+if not clerk_user:
     st.subheader("Sign in")
-    st.write("Sign in with Clerk before uploading a file or updating Noon.")
-    if st.button("Sign in with Clerk"):
-        st.login()
-    st.caption("If sign-in does not start, stop the server and run python run.py.")
+    st.write("Sign in with the same Clerk Google account as Pforge before uploading a file or updating Noon.")
+    if st.session_state.get("clerk_error"):
+        st.error(st.session_state.clerk_error)
+    st.link_button("Sign in with Clerk", sign_in_url())
     st.stop()
 
-signed_in_as = (
-    st.user.get("email")
-    or st.user.get("name")
-    or st.user.get("preferred_username")
-    or st.user.get("sub")
-    or "Clerk user"
-)
 identity, sign_out = st.columns([6, 1])
-identity.caption(f"Signed in as {signed_in_as}")
-if sign_out.button("Sign out"):
-    st.logout()
+identity.caption(f"Signed in as {clerk_user.get('label') or clerk_user.get('sub')}")
+sign_out.link_button("Sign out", sign_in_url() + "?sign_out=1")
 
 st.caption(
     "Columns whose name contains old or current are the existing Noon value. "

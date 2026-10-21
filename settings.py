@@ -7,16 +7,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 ENV_FILE = ROOT / ".env"
-SECRETS_FILE = ROOT / ".streamlit" / "secrets.toml"
 
 AUTH_ENV = (
-    "CLERK_OAUTH_CLIENT_ID",
-    "CLERK_OAUTH_CLIENT_SECRET",
+    "CLERK_SECRET_KEY",
+    "CLERK_PUBLISHABLE_KEY",
     "CLERK_JWT_ISSUER",
-    "STREAMLIT_AUTH_COOKIE_SECRET",
 )
 DATABASE_ENV = "BABACLICK_PROD_DATABASE_URL"
-DEFAULT_REDIRECT_URI = "http://localhost:8501/oauth2callback"
 
 
 def load_env_file() -> None:
@@ -46,32 +43,49 @@ def production_database_url() -> str:
     return os.getenv(DATABASE_ENV, "").strip()
 
 
-def redirect_uri() -> str:
+def clerk_secret_key() -> str:
     load_env_file()
-    return os.getenv("CLERK_OAUTH_REDIRECT_URI", DEFAULT_REDIRECT_URI).strip() or DEFAULT_REDIRECT_URI
+    return os.getenv("CLERK_SECRET_KEY", "").strip()
 
 
-def _quote(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+def clerk_publishable_key() -> str:
+    load_env_file()
+    return os.getenv("CLERK_PUBLISHABLE_KEY", "").strip()
 
 
-def write_auth_secrets() -> None:
-    """Write the Streamlit auth file from the environment. No database URL is stored here."""
-    missing = missing_auth_env()
-    if missing:
-        raise RuntimeError("Missing " + ", ".join(missing))
-    issuer = os.environ["CLERK_JWT_ISSUER"].strip().rstrip("/")
-    body = "\n".join(
-        [
-            "[auth]",
-            f"redirect_uri = {_quote(redirect_uri())}",
-            f"cookie_secret = {_quote(os.environ['STREAMLIT_AUTH_COOKIE_SECRET'].strip())}",
-            f"client_id = {_quote(os.environ['CLERK_OAUTH_CLIENT_ID'].strip())}",
-            f"client_secret = {_quote(os.environ['CLERK_OAUTH_CLIENT_SECRET'].strip())}",
-            f'server_metadata_url = {_quote(issuer + "/.well-known/openid-configuration")}',
-            "",
-        ]
-    )
-    SECRETS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SECRETS_FILE.write_text(body, encoding="utf-8")
+def clerk_issuer() -> str:
+    load_env_file()
+    return os.getenv("CLERK_JWT_ISSUER", "").strip().rstrip("/")
+
+
+def clerk_authorized_parties() -> list[str]:
+    """Same rule as Pforge: an empty list does not restrict azp."""
+    load_env_file()
+    raw = os.getenv("CLERK_AUTHORIZED_PARTIES", "")
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def listen_port() -> int:
+    """Public port. Render sets PORT; locally this is 8501."""
+    load_env_file()
+    raw = os.getenv("PORT", "8501").strip() or "8501"
+    return int(raw)
+
+
+def streamlit_port() -> int:
+    """Streamlit stays on an internal port. The public port is the proxy."""
+    public = listen_port()
+    return 8510 if public != 8510 else 8511
+
+
+def public_origin() -> str:
+    """Browser origin of this service. Render sets RENDER_EXTERNAL_URL."""
+    load_env_file()
+    configured = os.getenv("APP_URL", "").strip() or os.getenv("RENDER_EXTERNAL_URL", "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return f"http://localhost:{listen_port()}"
+
+
+def sign_in_url() -> str:
+    return public_origin() + "/sign-in"
