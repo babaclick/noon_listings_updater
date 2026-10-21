@@ -317,8 +317,17 @@ def _run_records(records: list[dict]) -> list[dict[str, str]]:
             calls = apply_changes(client, sku, changes, marketplace_id=MARKETPLACE_ID)
             ok, detail = _result_detail(calls)
             if ok:
-                detail = f"{detail}; {save_listing(database, sku, changes)}"
-                results.append({"partner_sku": sku, "status": "updated", "detail": detail})
+                note = save_listing(database, sku, changes)
+                if note.startswith("database save failed"):
+                    results.append(
+                        {
+                            "partner_sku": sku,
+                            "status": "failed",
+                            "detail": f"{detail}; Noon was updated; {note}",
+                        }
+                    )
+                else:
+                    results.append({"partner_sku": sku, "status": "updated", "detail": f"{detail}; {note}"})
             else:
                 results.append({"partner_sku": sku, "status": "failed", "detail": detail})
     finally:
@@ -391,8 +400,19 @@ if st.button("Update Noon listings", disabled=not (ready and tested)):
                         calls = apply_changes(client, sku, changes, marketplace_id=MARKETPLACE_ID)
                         ok, detail = _result_detail(calls)
                         if ok:
-                            detail = f"{detail}; {save_listing(database, sku, changes)}"
-                            results.append({"partner_sku": sku, "status": "updated", "detail": detail})
+                            note = save_listing(database, sku, changes)
+                            if note.startswith("database save failed"):
+                                results.append(
+                                    {
+                                        "partner_sku": sku,
+                                        "status": "failed",
+                                        "detail": f"{detail}; Noon was updated; {note}",
+                                    }
+                                )
+                            else:
+                                results.append(
+                                    {"partner_sku": sku, "status": "updated", "detail": f"{detail}; {note}"}
+                                )
                         else:
                             results.append({"partner_sku": sku, "status": "failed", "detail": detail})
                     except Exception as exc:

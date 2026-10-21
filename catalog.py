@@ -11,19 +11,19 @@ _UPDATE = """
 UPDATE pforge.listings
 SET
   final_product_name = CASE
-    WHEN %(title)s IS NULL THEN final_product_name
-    ELSE %(title)s
+    WHEN %(title)s::text IS NULL THEN final_product_name
+    ELSE %(title)s::text
   END,
   listing_weight_kg_per_unit = CASE
-    WHEN %(weight_kg)s IS NULL THEN listing_weight_kg_per_unit
-    ELSE %(weight_kg)s
+    WHEN %(weight_kg)s::numeric IS NULL THEN listing_weight_kg_per_unit
+    ELSE %(weight_kg)s::numeric
   END,
   listing_weight_kg_total = CASE
-    WHEN %(weight_kg)s IS NULL THEN listing_weight_kg_total
-    ELSE %(weight_kg)s
+    WHEN %(weight_kg)s::numeric IS NULL THEN listing_weight_kg_total
+    ELSE %(weight_kg)s::numeric
   END,
   schema_fill_json = CASE
-    WHEN %(price)s IS NULL THEN with_title.json
+    WHEN %(price)s::text IS NULL THEN with_title.json
     ELSE jsonb_set(
       with_title.json,
       '{noon_economics,sell_aed}',
@@ -34,7 +34,7 @@ SET
   updated_at = now()
 FROM (
   SELECT CASE
-    WHEN %(title)s IS NULL THEN COALESCE(schema_fill_json, '{}'::jsonb)
+    WHEN %(title)s::text IS NULL THEN COALESCE(schema_fill_json, '{}'::jsonb)
     ELSE jsonb_set(
       COALESCE(schema_fill_json, '{}'::jsonb),
       '{noon_title_en}',
@@ -87,10 +87,14 @@ def save_listing(conn: psycopg.Connection, partner_sku: str, changes: dict[str, 
     values = listing_values(changes)
     if not any(values.values()):
         return "database unchanged"
-    with conn.cursor() as cur:
-        cur.execute(_UPDATE, {"sku": partner_sku, **values})
-        updated = cur.rowcount
-    conn.commit()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_UPDATE, {"sku": partner_sku, **values})
+            updated = cur.rowcount
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        return f"database save failed: {exc}"
     if updated == 0:
         return "database: no pforge listing for this SKU"
     return "database saved"
