@@ -102,6 +102,9 @@ def content_body(partner_sku: str, changes: dict[str, Any]) -> dict[str, Any]:
         attributes["shipping_weight"] = _values({"value": weight})
         attributes["shipping_weight_unit"] = _values({"value": "gram"})
     body: dict[str, Any] = {"skus": [{"partner_sku": partner_sku}], "attributes": attributes}
+    category = _text(changes.get("category"))
+    if category:
+        body["category"] = category
     if brand:
         body["brand"] = brand
     return body
@@ -128,12 +131,29 @@ def barcode_body(partner_sku: str, gtin: str) -> dict[str, Any]:
     return {"items": [{"barcode": gtin, "partner_sku": partner_sku, "force_map": False}]}
 
 
-def apply_changes(client: NoonClient, partner_sku: str, changes: dict[str, Any]) -> list[dict[str, Any]]:
+def apply_changes(
+    client: NoonClient,
+    partner_sku: str,
+    changes: dict[str, Any],
+    *,
+    marketplace_id: str = "",
+) -> list[dict[str, Any]]:
     """Send only the Noon fields present in changes. Returns one result per call."""
     results: list[dict[str, Any]] = []
     content_keys = {"title", "weight_g", "brand", "description"}
+    noon_marketplace = marketplace_id.strip().lower().startswith("noon")
     if content_keys & set(changes):
-        results.append({"call": "content", **client.post(CONTENT_PATH, content_body(partner_sku, changes))})
+        if noon_marketplace and not _text(changes.get("category")):
+            results.append(
+                {
+                    "call": "content",
+                    "ok": False,
+                    "status_code": 0,
+                    "detail": "missing noon category",
+                }
+            )
+        else:
+            results.append({"call": "content", **client.post(CONTENT_PATH, content_body(partner_sku, changes))})
     if "price" in changes:
         results.append({"call": "price", **client.post(PRICING_PATH, pricing_body(partner_sku, changes["price"]))})
     if "stock" in changes:

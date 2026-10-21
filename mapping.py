@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 
 # Fields this updater can send to an existing Noon listing.
-NOON_FIELDS = ("title", "price", "weight", "brand", "gtin", "description", "stock")
+NOON_FIELDS = ("title", "price", "weight", "brand", "gtin", "description", "stock", "category")
 
 _FIELD_TOKENS = {
     "title": {"title", "name"},
@@ -16,6 +16,7 @@ _FIELD_TOKENS = {
     "gtin": {"gtin", "barcode", "ean"},
     "description": {"description"},
     "stock": {"stock", "qty", "quantity"},
+    "category": {"category"},
 }
 _OLD_TOKENS = {"old", "current", "existing"}
 _NEW_TOKENS = {"new"}
@@ -73,6 +74,15 @@ def classify_columns(headers: list[str]) -> list[ColumnRole]:
         elif names & _OLD_TOKENS:
             roles.append(ColumnRole(header, field, "old"))
     return roles
+
+
+def category_column(headers: list[str]) -> str | None:
+    """Current Noon category. It is resent as-is and has no old/new pair."""
+    for header in headers:
+        parts = tokens(header)
+        if field_for(parts) == "category" and not (set(parts) & (_OLD_TOKENS | _NEW_TOKENS)):
+            return header
+    return None
 
 
 def weight_unit(header: str) -> str:

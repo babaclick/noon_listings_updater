@@ -9,9 +9,11 @@ import psycopg
 
 from catalog import check_connection, save_listing
 from clerk_auth import ClerkAuthError, clerk_user_label, revoke_session, session_is_active, verify_clerk_token
-from mapping import classify_columns, sku_column, weight_unit
+from mapping import category_column, classify_columns, sku_column, weight_unit
 from noon_client import NoonClient, apply_changes
 from settings import AUTH_ENV, DATABASE_ENV, missing_auth_env, production_database_url, sign_in_url
+
+MARKETPLACE_ID = "noon_ae"
 
 st.set_page_config(page_title="Noon listing update", layout="wide")
 st.title("Noon listing update")
@@ -138,6 +140,7 @@ else:
 frame = frame.fillna("")
 headers = [str(column) for column in frame.columns]
 sku_name = sku_column(headers)
+category_name = category_column(headers)
 roles = classify_columns(headers)
 
 st.subheader("File")
@@ -146,6 +149,11 @@ if sku_name is None:
     st.error("No Noon partner SKU column. Add noon_sku, partner_sku, or sku.")
 else:
     st.success(f"Partner SKU column: {sku_name}")
+if MARKETPLACE_ID.startswith("noon"):
+    if category_name is None:
+        st.error("Noon content updates need a noon_category column.")
+    else:
+        st.success(f"Noon category column: {category_name}")
 
 role_rows = [
     {"column": role.column, "noon_field": role.field, "use_as": "value to send" if role.side == "new" else "existing value"}
@@ -199,6 +207,10 @@ st.dataframe(pd.DataFrame(preview), use_container_width=True, hide_index=True)
 
 def _changes_for_row(record: dict, new_columns: dict[str, str]) -> dict:
     changes: dict = {}
+    if category_name:
+        category = str(record.get(category_name, "")).strip()
+        if category:
+            changes["category"] = category
     for field, column in new_columns.items():
         raw = str(record.get(column, "")).strip()
         if not raw:
@@ -243,6 +255,16 @@ base_url = st.text_input("API base URL", value="https://noon-api-gateway.noon.pa
 private_key = st.text_area("Private key", height=160)
 confirm = st.checkbox("Send these new values to Noon and save them on the production listing")
 
+content_fields = {"title", "weight", "brand", "description"}
+category_required = MARKETPLACE_ID.startswith("noon") and bool(content_fields & set(new_by_field))
+missing_category = 0
+if category_required:
+    for record in frame.to_dict(orient="records"):
+        if not str(record.get(category_name or "", "")).strip():
+            missing_category += 1
+    if missing_category:
+        st.error(f"{missing_category} Noon rows have no category and will not be sent.")
+
 ready = bool(
     sku_name
     and new_by_field
@@ -250,8 +272,84 @@ ready = bool(
     and key_id.strip()
     and db_ready
     and confirm
+    and not missing_category
 )
-if st.button("Update Noon listings", disabled=not ready):
+if "tested_sku" not in st.session_state:
+    st.session_state.tested_sku = ""
+
+
+def _result_detail(calls: list[dict], database_note: str = "") -> tuple[bool, str]:
+    failed = [call for call in calls if not call["ok"]]
+    parts = []
+    for call in calls:
+        if call["ok"]:
+            parts.append(call["call"])
+        else:
+            parts.append(f"{call['call']} HTTP {call['status_code']}: {call.get('detail') or ''}")
+    if database_note:
+        parts.append(database_note)
+    return not failed, "; ".join(parts)
+
+
+def _run_records(records: list[dict]) -> list[dict[str, str]]:
+    results: list[dict[str, str]] = []
+    database = None
+    client = None
+    try:
+        check_connection(database_url)
+        database = psycopg.connect(database_url.strip(), connect_timeout=15)
+        client = NoonClient(
+            private_key=private_key,
+            key_id=key_id,
+            project_code=project_code,
+            base_url=base_url,
+        )
+        client.login()
+        for record in records:
+            sku = str(record.get(sku_name, "")).strip()
+            if not sku:
+                results.append({"partner_sku": "", "status": "skipped", "detail": "missing partner SKU"})
+                continue
+            changes = _changes_for_row(record, new_by_field)
+            if not any(key != "category" for key in changes):
+                results.append({"partner_sku": sku, "status": "skipped", "detail": "no new values"})
+                continue
+            calls = apply_changes(client, sku, changes, marketplace_id=MARKETPLACE_ID)
+            ok, detail = _result_detail(calls)
+            if ok:
+                detail = f"{detail}; {save_listing(database, sku, changes)}"
+                results.append({"partner_sku": sku, "status": "updated", "detail": detail})
+            else:
+                results.append({"partner_sku": sku, "status": "failed", "detail": detail})
+    finally:
+        if client is not None:
+            client.close()
+        if database is not None:
+            database.close()
+    return results
+
+
+first_record = next(
+    (
+        record
+        for record in frame.to_dict(orient="records")
+        if str(record.get(sku_name or "", "")).strip()
+    ),
+    None,
+)
+if st.button("Test one listing", disabled=not ready):
+    try:
+        test_results = _run_records([first_record])
+    except Exception as exc:
+        st.session_state.tested_sku = ""
+        st.error(f"Test failed before the listing was changed. {exc}")
+    else:
+        st.session_state.tested_sku = test_results[0]["partner_sku"] if test_results[0]["status"] == "updated" else ""
+        st.dataframe(pd.DataFrame(test_results), use_container_width=True, hide_index=True)
+tested = bool(first_record) and st.session_state.tested_sku == str(first_record.get(sku_name, "")).strip()
+if ready and not tested:
+    st.info("Test one listing before updating the rest.")
+if st.button("Update Noon listings", disabled=not (ready and tested)):
     progress = st.progress(0)
     status = st.empty()
     table = st.empty()
@@ -286,18 +384,13 @@ if st.button("Update Noon listings", disabled=not ready):
                 results.append({"partner_sku": "", "status": "skipped", "detail": "missing partner SKU"})
             else:
                 changes = _changes_for_row(record, new_by_field)
-                if not changes:
+                if not any(key != "category" for key in changes):
                     results.append({"partner_sku": sku, "status": "skipped", "detail": "no new values"})
                 else:
                     try:
-                        calls = apply_changes(client, sku, changes)
-                        failed = [call for call in calls if not call["ok"]]
-                        detail = ", ".join(call["call"] for call in calls if call["ok"])
-                        if failed:
-                            detail = "; ".join(
-                                [detail, *(f"{call['call']} HTTP {call['status_code']}" for call in failed)]
-                            ).strip("; ")
-                        if not failed:
+                        calls = apply_changes(client, sku, changes, marketplace_id=MARKETPLACE_ID)
+                        ok, detail = _result_detail(calls)
+                        if ok:
                             detail = f"{detail}; {save_listing(database, sku, changes)}"
                             results.append({"partner_sku": sku, "status": "updated", "detail": detail})
                         else:
