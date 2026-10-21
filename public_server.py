@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 
@@ -93,12 +94,14 @@ async def proxy_http(request: Request) -> Response:
         headers=headers,
         content=await request.body(),
     )
-    response_headers = [
-        (key, value)
+    body = upstream.content
+    response = Response(body, status_code=upstream.status_code)
+    response.raw_headers = [
+        (key.lower().encode("latin-1"), value.encode("latin-1"))
         for key, value in upstream.headers.multi_items()
         if key.lower() not in _HOP
-    ]
-    return Response(upstream.content, status_code=upstream.status_code, headers=response_headers)
+    ] + [(b"content-length", str(len(body)).encode("latin-1"))]
+    return response
 
 
 def _header_argument() -> str:
@@ -109,7 +112,6 @@ def _header_argument() -> str:
 
 
 async def proxy_ws(websocket: WebSocket) -> None:
-    await websocket.accept()
     path = websocket.url.path
     query = websocket.url.query
     upstream_url = f"ws://127.0.0.1:{streamlit_port()}{path}"
@@ -119,15 +121,22 @@ async def proxy_ws(websocket: WebSocket) -> None:
     cookie = websocket.headers.get("cookie")
     if cookie:
         headers["Cookie"] = cookie
+    subprotocols = list(websocket.scope.get("subprotocols") or [])
+    accepted = False
     try:
         connect_kwargs = {
             _header_argument(): headers,
             "ping_interval": 20,
             "max_size": None,
         }
+        if subprotocols:
+            connect_kwargs["subprotocols"] = subprotocols
         if "proxy" in inspect.signature(websockets.connect).parameters:
             connect_kwargs["proxy"] = None
         async with websockets.connect(upstream_url, **connect_kwargs) as upstream:
+            await websocket.accept(subprotocol=upstream.subprotocol)
+            accepted = True
+
             async def from_browser() -> None:
                 while True:
                     message = await websocket.receive()
@@ -145,8 +154,6 @@ async def proxy_ws(websocket: WebSocket) -> None:
                     else:
                         await websocket.send_bytes(message)
 
-            import asyncio
-
             tasks = [
                 asyncio.create_task(from_browser()),
                 asyncio.create_task(from_streamlit()),
@@ -155,13 +162,17 @@ async def proxy_ws(websocket: WebSocket) -> None:
             for task in pending:
                 task.cancel()
             for task in done:
-                task.result() if not task.cancelled() else None
+                if not task.cancelled():
+                    task.exception()
     except (WebSocketDisconnect, OSError, websockets.WebSocketException):
         pass
     finally:
         try:
-            await websocket.close()
-        except RuntimeError:
+            if accepted:
+                await websocket.close()
+            else:
+                await websocket.close(code=1011)
+        except (RuntimeError, WebSocketDisconnect):
             pass
 
 
